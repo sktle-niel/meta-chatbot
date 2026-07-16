@@ -1,19 +1,26 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { betaZodTool } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { z } from "zod";
-import { searchProducts, getStockLevels } from "./loyverse.js";
+import { searchProducts, getStockLevels, getTargetStore, variantPrice } from "./loyverse.js";
 
 const client = new Anthropic();
 
 const MODEL = "claude-opus-4-8";
 const MAX_HISTORY_TURNS = 20; // per-customer memory window
 
-const SYSTEM_PROMPT = `You are a friendly customer service assistant for our store, chatting with customers on Facebook Messenger.
+const STORE_NAME = process.env.LOYVERSE_STORE_NAME?.trim() || "our store";
 
-You answer questions about products and stock availability using the tools provided. Always check the tools before making claims about what we carry or what's in stock — never guess.
+const SYSTEM_PROMPT = `You are a friendly customer service assistant for ${STORE_NAME}, a car services shop (oils, filters, parts, and auto services), chatting with customers on Facebook Messenger.
+
+You answer questions about products and stock availability using the tools provided. Always check the tools before making claims about what we carry or what's in stock — never guess. All prices and stock you report are for the ${STORE_NAME} branch only.
+
+Language rule (strict): detect the language of the customer's message and reply in that SAME language only.
+- English message -> reply purely in English.
+- Tagalog/Filipino message -> reply purely in Tagalog.
+- Taglish message -> Taglish reply is fine.
+Never switch to a different language than the customer used.
 
 Guidelines:
-- Reply in the same language the customer uses (Filipino/Taglish/English).
 - Keep replies short and conversational — this is Messenger, not email. Stay under 1900 characters.
 - Prices from the tools are in the store's currency; format them nicely (e.g. ₱150.00).
 - If a product isn't found, say so politely and suggest the closest matches if any.
@@ -22,12 +29,12 @@ Guidelines:
 const searchProductsTool = betaZodTool({
   name: "search_products",
   description:
-    "Search the store's product catalog by name, description, or SKU. Call this whenever a customer asks about a product, its price, or whether the store carries it. Returns matching items with their variant IDs and default prices.",
+    "Search the store's product catalog by name, description, or SKU. The search is typo-tolerant (fuzzy), so pass the customer's words as-is even if misspelled. Call this whenever a customer asks about a product, its price, or whether the store carries it. If nothing matches, retry once with fewer or corrected keywords (e.g. just the most distinctive word). Returns matching items with their variant IDs and default prices.",
   inputSchema: z.object({
     query: z.string().describe("Search keywords, e.g. 'coke zero' or a SKU"),
   }),
   run: async ({ query }) => {
-    const results = await searchProducts(query);
+    const [results, targetStore] = await Promise.all([searchProducts(query), getTargetStore()]);
     if (results.length === 0) return `No products matched "${query}".`;
     return JSON.stringify(
       results.map((item) => ({
@@ -37,7 +44,7 @@ const searchProductsTool = betaZodTool({
           variant_id: v.variant_id,
           sku: v.sku,
           option: v.option1_value,
-          default_price: v.default_price,
+          price: variantPrice(v, targetStore?.id),
         })),
       })),
     );
