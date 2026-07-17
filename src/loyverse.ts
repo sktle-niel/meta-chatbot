@@ -1,8 +1,20 @@
 // Thin client for the Loyverse API (https://developer.loyverse.com/docs/)
 // Products are cached in memory so we stay well under Loyverse's rate limits.
 
+import { fetch as undiciFetch, Agent } from "undici";
+
 const BASE_URL = "https://api.loyverse.com/v1.0";
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+// Item names/prices change rarely, and a full catalog fetch takes ~7 minutes
+// on this network — keep the cache long-lived. Stock checks are always live.
+const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+// Loyverse responds very slowly from this network (30-60s per request), so
+// Node's default 10s connect timeout is far too tight.
+const dispatcher = new Agent({
+  connectTimeout: 60_000,
+  headersTimeout: 180_000,
+  bodyTimeout: 180_000,
+});
 
 interface VariantStoreInfo {
   store_id: string;
@@ -42,24 +54,39 @@ async function loyverseGet<T>(path: string, params?: Record<string, string>): Pr
   const url = new URL(`${BASE_URL}${path}`);
   for (const [k, v] of Object.entries(params ?? {})) url.searchParams.set(k, v);
 
-  const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${process.env.LOYVERSE_ACCESS_TOKEN}` },
-  });
-  if (!res.ok) {
-    throw new Error(`Loyverse API ${res.status} on ${path}: ${await res.text()}`);
+  // Retry network errors and 5xx — the connection to Loyverse is flaky/slow here.
+  const attempts = 3;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const res = await undiciFetch(url, {
+        dispatcher,
+        headers: { Authorization: `Bearer ${process.env.LOYVERSE_ACCESS_TOKEN}` },
+      });
+      if (res.ok) return (await res.json()) as T;
+      const body = await res.text();
+      if (res.status < 500) {
+        // Client error (bad token, bad params) — retrying won't help.
+        throw new Error(`Loyverse API ${res.status} on ${path}: ${body}`);
+      }
+      lastError = new Error(`Loyverse API ${res.status} on ${path}: ${body}`);
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith("Loyverse API 4")) throw err;
+      lastError = err;
+    }
+    if (attempt < attempts) {
+      console.warn(`Loyverse ${path} attempt ${attempt} failed, retrying...`);
+      await new Promise((r) => setTimeout(r, attempt * 2000));
+    }
   }
-  return res.json() as Promise<T>;
+  throw lastError;
 }
 
 let itemsCache: { items: LoyverseItem[]; fetchedAt: number } | null = null;
 let storesCache: Store[] | null = null;
+let itemsRefresh: Promise<LoyverseItem[]> | null = null;
 
-/** All items, following pagination, cached for 5 minutes. */
-export async function getAllItems(): Promise<LoyverseItem[]> {
-  if (itemsCache && Date.now() - itemsCache.fetchedAt < CACHE_TTL_MS) {
-    return itemsCache.items;
-  }
-
+async function fetchAllItemPages(): Promise<LoyverseItem[]> {
   const items: LoyverseItem[] = [];
   let cursor: string | undefined;
   do {
@@ -69,9 +96,39 @@ export async function getAllItems(): Promise<LoyverseItem[]> {
     items.push(...page.items);
     cursor = page.cursor;
   } while (cursor);
-
-  itemsCache = { items, fetchedAt: Date.now() };
   return items;
+}
+
+function refreshItems(): Promise<LoyverseItem[]> {
+  // Single-flight: concurrent callers share one refresh instead of stacking
+  // duplicate multi-minute fetches against the slow Loyverse API.
+  if (!itemsRefresh) {
+    itemsRefresh = fetchAllItemPages()
+      .then((items) => {
+        itemsCache = { items, fetchedAt: Date.now() };
+        console.log(`Loyverse item cache refreshed: ${items.length} items`);
+        return items;
+      })
+      .finally(() => {
+        itemsRefresh = null;
+      });
+  }
+  return itemsRefresh;
+}
+
+/**
+ * All items, following pagination. Fresh cache is served directly; a stale
+ * cache is served immediately while a background refresh runs (Loyverse can
+ * take a minute+ to answer, and customers shouldn't wait on that).
+ */
+export async function getAllItems(): Promise<LoyverseItem[]> {
+  if (itemsCache) {
+    if (Date.now() - itemsCache.fetchedAt >= CACHE_TTL_MS) {
+      refreshItems().catch((err) => console.error("Item cache refresh failed:", err));
+    }
+    return itemsCache.items;
+  }
+  return refreshItems();
 }
 
 export async function getStores(): Promise<Store[]> {
@@ -153,8 +210,12 @@ function levenshtein(a: string, b: string): number {
  */
 function termSimilarity(term: string, word: string): number {
   if (word === term) return 1;
-  if (word.startsWith(term) || term.startsWith(word)) return 0.95;
-  if (word.includes(term) || term.includes(word)) return 0.9;
+  // Containment bonuses only when the shorter string is meaningful (3+ chars) —
+  // otherwise one-letter words like the "L"/"H" in "L/H" match everything.
+  if (Math.min(term.length, word.length) >= 3) {
+    if (word.startsWith(term) || term.startsWith(word)) return 0.95;
+    if (word.includes(term) || term.includes(word)) return 0.9;
+  }
   const dist = levenshtein(term, word);
   return 1 - dist / Math.max(term.length, word.length);
 }

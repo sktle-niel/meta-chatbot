@@ -1,6 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import { answerCustomer } from "./claude.js";
+import { getAllItems, getTargetStore } from "./loyverse.js";
 import { sendTextMessage, sendTypingIndicator } from "./messenger.js";
 
 const app = express();
@@ -68,3 +69,16 @@ app.listen(port, () => {
   console.log(`Server listening on http://localhost:${port}`);
   console.log(`Webhook endpoint: http://localhost:${port}/webhook`);
 });
+
+// Warm the caches at startup — Loyverse takes a minute+ to answer from this
+// network, and the first customer shouldn't be the one waiting on it.
+(async () => {
+  try {
+    const store = await getTargetStore();
+    console.log(store ? `Answering for store: ${store.name}` : "Answering for all stores");
+    const items = await getAllItems();
+    console.log(`Product cache warmed: ${items.length} items`);
+  } catch (err) {
+    console.error("Startup cache warm failed (will retry on first message):", err);
+  }
+})();
