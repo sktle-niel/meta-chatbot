@@ -34,10 +34,14 @@ app.post("/webhook", (req, res) => {
     for (const event of entry.messaging ?? []) {
       const senderId: string | undefined = event.sender?.id;
       const text: string | undefined = event.message?.text;
+      // Customers often send a photo of the part they're looking for.
+      const imageUrls: string[] = (event.message?.attachments ?? [])
+        .filter((a: any) => a.type === "image" && a.payload?.url)
+        .map((a: any) => a.payload.url as string);
       // Ignore echoes of our own messages, delivery receipts, etc.
-      if (!senderId || !text || event.message?.is_echo) continue;
+      if (!senderId || (!text && imageUrls.length === 0) || event.message?.is_echo) continue;
 
-      handleMessage(senderId, text).catch((err) => {
+      handleMessage(senderId, text ?? "", imageUrls).catch((err) => {
         console.error("Failed to handle message:", err);
         sendTextMessage(
           senderId,
@@ -48,11 +52,11 @@ app.post("/webhook", (req, res) => {
   }
 });
 
-async function handleMessage(senderId: string, text: string): Promise<void> {
-  console.log(`[${senderId}] ${text}`);
+async function handleMessage(senderId: string, text: string, imageUrls: string[] = []): Promise<void> {
+  console.log(`[${senderId}] ${text}${imageUrls.length ? ` (+${imageUrls.length} photo/s)` : ""}`);
   await sendTypingIndicator(senderId, true);
   try {
-    const reply = await answerCustomer(senderId, text);
+    const reply = await answerCustomer(senderId, text, imageUrls);
     console.log(`[${senderId}] -> ${reply}`);
     await sendTextMessage(senderId, reply);
   } finally {
