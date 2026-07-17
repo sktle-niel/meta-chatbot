@@ -5,7 +5,7 @@ import { searchProducts, getStockLevels, getTargetStore, variantPrice } from "./
 
 const client = new Anthropic();
 
-const MODEL = "claude-opus-4-8";
+const MODEL = "claude-haiku-4-5";
 const MAX_HISTORY_TURNS = 20; // per-customer memory window
 
 const STORE_NAME = process.env.LOYVERSE_STORE_NAME?.trim() || "our store";
@@ -29,9 +29,25 @@ Quantities and stock (IMPORTANT — be exact):
 - When a customer asks for a specific quantity, always call check_stock and compare against what they need. If they want 11 but only 7 are in stock, say clearly that only 7 are available right now — never promise quantities we don't have.
 - Never claim availability without checking the stock tool in this conversation turn.
 
-Repairs, labor, and services (IMPORTANT):
-- Quote prices ONLY for products in the catalog. NEVER give any price, estimate, or range for repairs, labor, installation, or "magkano magpagawa/pagawa" questions — repair cost always depends on actual inspection of the vehicle.
-- For any repair/service inquiry, warmly invite them instead: our expert mechanics at ${STORE_NAME} will gladly check their vehicle first so they get the right assessment — just bring the car over. Be encouraging and welcoming about it (e.g. "Dalhin niyo lang po ang sasakyan dito boss, magagaling ang mga mekaniko namin at titingnan muna nila para makuha niyo ang tamang presyo.").
+Services we offer (these are NOT in the product catalog — answer service questions from this list, no tools needed):
+✓ Oil Change
+✓ Brake Repair & Inspection
+✓ Tire Services
+✓ Battery Services
+✓ Electrical System Repairs
+✓ A/C Repairs
+✓ Engine Diagnostic
+✓ Suspension & Steering
+✓ Transmission Repair
+📍 Location: Tagburos, Palawan
+📱 Contact: +63 936 951 0201
+
+Service inquiry rules (IMPORTANT):
+- When a customer asks if we do or can fix something ("nag-aayos ba kayo ng...?", "pwede ba magpa-...?"), match their request against the services list GENEROUSLY — related or adjacent work counts even if they don't use the exact service name. Examples: aircon compressor / freon / "mainit ang aircon" -> A/C Repairs; alternator, wiring, ilaw, horn -> Electrical System Repairs; vulcanizing, palit gulong, wheel balancing -> Tire Services; kalampag, shock absorber -> Suspension & Steering; hirap mag-shift, clutch -> Transmission Repair; hina ng preno -> Brake Repair & Inspection; ayaw mag-start, check engine light -> Engine Diagnostic o Battery Services.
+- If the request is covered or closely related, say yes warmly and invite them to bring the vehicle — our expert mechanics will take care of it. Share the location and contact number when helpful.
+- If the request is genuinely NOT related to any service on the list, apologize politely and say it's not available yet but will be soon (e.g. "Pasensya na po, hindi pa namin ino-offer yan sa ngayon — pero soon po magiging available din yan sa amin. Thank you po!").
+- NEVER give any price, estimate, or range for services, repairs, labor, or installation — no matter how the customer asks. Explain nicely that it's better to have the vehicle checked first so the mechanic can see everything and give the complete and accurate cost (e.g. "Mas maganda po na ipa-check muna natin ang sasakyan para makita ng mekaniko namin lahat at malaman niyo ang kabuuang gastos — dalhin niyo lang po dito sa ${STORE_NAME}.").
+- Product prices from the catalog are still fine to quote — only service/labor pricing is off-limits.
 
 Guidelines:
 - Keep replies short and conversational — this is Messenger, not email. Stay under 1900 characters.
@@ -104,7 +120,7 @@ export async function answerCustomer(
     model: MODEL,
     max_tokens: 2048, // Messenger caps messages at 2000 chars, so replies are short
     system: SYSTEM_PROMPT,
-    thinking: { type: "adaptive" },
+    // Note: no `thinking` param — Haiku 4.5 doesn't support adaptive thinking.
     tools: [searchProductsTool, checkStockTool],
     messages: [...history, { role: "user", content: userContent }],
     max_iterations: 8,
