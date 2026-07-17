@@ -20,6 +20,19 @@ Language rule (strict): detect the language of the customer's message and reply 
 - Taglish message -> Taglish reply is fine.
 Never switch to a different language than the customer used.
 
+Photo inquiries:
+- Customers often send a photo of a product (oil, car parts, accessories, anything) asking if we carry it. Identify the item from the photo — read visible label text, brand, product name, type, and size/variant — then search the catalog for it. Search with the most specific terms first (brand + product name), then retry with broader terms if nothing matches.
+- If the photo is too unclear to identify, say what you can see and ask one short clarifying question.
+- Never say we carry an item based only on the photo — always confirm against the catalog first.
+
+Quantities and stock (IMPORTANT — be exact):
+- When a customer asks for a specific quantity, always call check_stock and compare against what they need. If they want 11 but only 7 are in stock, say clearly that only 7 are available right now — never promise quantities we don't have.
+- Never claim availability without checking the stock tool in this conversation turn.
+
+Repairs, labor, and services (IMPORTANT):
+- Quote prices ONLY for products in the catalog. NEVER give any price, estimate, or range for repairs, labor, installation, or "magkano magpagawa/pagawa" questions — repair cost always depends on actual inspection of the vehicle.
+- For any repair/service inquiry, warmly invite them instead: our expert mechanics at ${STORE_NAME} will gladly check their vehicle first so they get the right assessment — just bring the car over. Be encouraging and welcoming about it (e.g. "Dalhin niyo lang po ang sasakyan dito boss, magagaling ang mga mekaniko namin at titingnan muna nila para makuha niyo ang tamang presyo.").
+
 Guidelines:
 - Keep replies short and conversational — this is Messenger, not email. Stay under 1900 characters.
 - Prices from the tools are in the store's currency; format them nicely (e.g. ₱150.00).
@@ -54,7 +67,7 @@ const searchProductsTool = betaZodTool({
 const checkStockTool = betaZodTool({
   name: "check_stock",
   description:
-    "Get current stock levels per store for one or more product variants. Call this when a customer asks about availability. Use variant_id values returned by search_products.",
+    "Get current stock levels for one or more product variants. Call this whenever a customer asks about availability OR wants a specific quantity — always compare in_stock against the quantity they need before promising anything. Use variant_id values returned by search_products.",
   inputSchema: z.object({
     variant_ids: z.array(z.string()).describe("Variant IDs from search_products"),
   }),
@@ -69,9 +82,23 @@ const checkStockTool = betaZodTool({
 // In-memory only — restarting the server clears it, which is fine for a chatbot.
 const histories = new Map<string, Anthropic.Beta.BetaMessageParam[]>();
 
-export async function answerCustomer(senderId: string, text: string): Promise<string> {
+export async function answerCustomer(
+  senderId: string,
+  text: string,
+  imageUrls: string[] = [],
+): Promise<string> {
   const history = histories.get(senderId) ?? [];
-  history.push({ role: "user", content: text });
+
+  // Attach any photos the customer sent so Claude can identify the product.
+  const userContent: Anthropic.Beta.BetaContentBlockParam[] = [
+    ...imageUrls.map(
+      (url): Anthropic.Beta.BetaImageBlockParam => ({
+        type: "image",
+        source: { type: "url", url },
+      }),
+    ),
+    { type: "text", text: text || "(the customer sent a photo with no text)" },
+  ];
 
   const finalMessage = await client.beta.messages.toolRunner({
     model: MODEL,
@@ -79,7 +106,7 @@ export async function answerCustomer(senderId: string, text: string): Promise<st
     system: SYSTEM_PROMPT,
     thinking: { type: "adaptive" },
     tools: [searchProductsTool, checkStockTool],
-    messages: history,
+    messages: [...history, { role: "user", content: userContent }],
     max_iterations: 8,
   });
 
@@ -90,7 +117,13 @@ export async function answerCustomer(senderId: string, text: string): Promise<st
     .trim();
 
   // Store only the text turns — tool calls don't need to survive across turns,
-  // and this keeps the history valid (no dangling tool_use blocks).
+  // and this keeps the history valid (no dangling tool_use blocks). Photos are
+  // stored as a text note: Messenger CDN URLs expire, and refetching them on a
+  // later turn would fail the whole request.
+  const userTurnForHistory = imageUrls.length
+    ? `[customer sent ${imageUrls.length} photo/s] ${text}`.trim()
+    : text;
+  history.push({ role: "user", content: userTurnForHistory });
   history.push({ role: "assistant", content: reply || "(no reply)" });
   histories.set(senderId, history.slice(-MAX_HISTORY_TURNS * 2));
 
